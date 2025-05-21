@@ -1,0 +1,1351 @@
+#include <ros/ros.h> // 載入 ROS 的主要標頭檔，提供 ROS 節點、話題、服務等功能
+#include <math.h> // 載入數學運算相關標頭檔
+#include <iostream> // 載入 C++ 輸入輸出串流標頭檔
+#include <Eigen/Dense> // 載入 Eigen 線性代數函式庫
+
+#include <geometry_msgs/Twist.h> // 載入 ROS geometry_msgs 套件中的 Twist 訊息型態，表示速度
+#include <geometry_msgs/Pose.h> // 載入 Pose 訊息型態，表示位置與姿態
+#include <geometry_msgs/PoseStamped.h> // 載入 PoseStamped 訊息型態，帶有時間戳的姿態
+#include <geometry_msgs/PoseArray.h> // 載入 PoseArray 訊息型態，表示多個姿態
+
+#include <nav_msgs/Path.h> // 載入 Path 訊息型態，表示一條路徑
+#include <nav_msgs/OccupancyGrid.h> // 載入 OccupancyGrid 訊息型態，表示地圖
+#include <nav_msgs/Odometry.h> // 載入 Odometry 訊息型態，表示里程計資訊
+
+
+#include <tf/transform_broadcaster.h> // 載入 TF 廣播器，負責座標轉換
+#include <tf/transform_listener.h> // 載入 TF 監聽器，負責接收座標轉換
+#include <tf/tf.h> // 載入 TF 工具
+#include <tf2_ros/transform_broadcaster.h> // 載入 TF2 廣播器
+#include <tf2_ros/transform_listener.h> // 載入 TF2 監聽器
+#include <tf/transform_datatypes.h> // 載入 TF 資料型態
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h> // 載入 TF2 與 geometry_msgs 轉換工具
+#include <sensor_msgs/Joy.h> // 載入 Joy 訊息型態，遊戲手把
+#include <sensor_msgs/LaserScan.h> // 載入 LaserScan 訊息型態，雷射掃描
+
+#include <costmap_converter/ObstacleMsg.h> // 載入障礙物訊息型態
+#include <costmap_converter/ObstacleArrayMsg.h> // 載入障礙物陣列訊息型態
+
+#include <visualization_msgs/Marker.h> // 載入 RViz 標記訊息型態
+#include <visualization_msgs/MarkerArray.h> // 載入 RViz 標記陣列訊息型態
+
+#include <campusrover_msgs/PlannerFunction.h> // 載入自訂服務 PlannerFunction
+#include <campusrover_msgs/ElevatorStatusChecker.h> // 載入自訂服務 ElevatorStatusChecker
+
+#define M_PI 3.14159265358979323846  /* pi */ // 定義圓周率常數
+using namespace std; // 使用 std 命名空間
+
+
+
+ros::Subscriber elevator_path_sub_, global_path_sub_, costmap_sub_, click_sub_, odom_sub_, custom_obst_sub_; // 電梯路徑、全域路徑、地圖、點擊、里程計、自訂障礙物
+ros::Publisher twist_pub_, twist_path_pub_, path_marker_pub_, global_status_check_pub_; // 速度、路徑、路徑標記、到達目標
+ros::ServiceClient elevator_status_check_client_, global_status_check_client_; // 電梯狀態檢查、全域狀態檢查
+
+nav_msgs::Path globle_path_; // 全域路徑
+geometry_msgs::PoseStamped target_pose_; // 目標姿態
+nav_msgs::OccupancyGrid costmap_data_; // 地圖資料
+
+geometry_msgs::Pose robot_tf_pose_; // 機器人當前姿態
+geometry_msgs::PoseArray obstacle_poses_; // 障礙物姿態陣列
+
+campusrover_msgs::ElevatorStatusChecker elevator_status_checker_msg_; // 電梯狀態檢查訊息
+std_msgs::Empty global_status_checker_msg_; // 空訊息，用於通知到達目標
+
+std::vector<Eigen::Vector2d> acc_pairs_; // 加速度取樣組合
+std::vector<Eigen::Vector2d> twist_pairs_; // 速度取樣組合
+
+string robot_frame_; // 機器人座標框架名稱
+int status_msg_; // 狀態訊息
+int path_sub_mode_; // 路徑訂閱模式
+
+double arriving_range_dis_; // 到達目標點距離閾值
+double arriving_range_angle_; // 到達目標方向角度閾值
+
+bool action_flag_ = false; // 啟動旗標
+bool get_globle_path_ = false; // 是否取得全域路徑
+bool get_costmap_data_ = false; // 是否取得地圖
+bool obstacle_stop_cmd_ = false; // 是否因障礙物停止
+bool arriving_end_point_= false; // 是否到達目標點
+bool arriving_end_direction_= false; // 是否到達目標方向
+bool enble_costmap_obstacle_; // 是否啟用 costmap 障礙物
+bool direction_inverse_= false; // 是否反向
+bool get_velocity_data_ = true; // 是否取得速度
+bool get_obstacle_data_ = false; // 是否取得障礙物
+
+double current_v_; // 當前線速度
+double current_w_; // 當前角速度
+
+bool enable_linear_depend_angular_; // 線速度是否依賴角速度
+double max_angle_of_linear_profile_; // 線速度 profile 最大角度
+double min_angle_of_linear_profile_; // 線速度 profile 最小角度
+
+double threshold_occupied_; // 障礙物判斷閾值
+double footprint_max_x_; // footprint 最大 x
+double footprint_min_x_; // footprint 最小 x
+double footprint_max_y_; // footprint 最大 y
+double footprint_min_y_; // footprint 最小 y
+double obstacle_max_dis_; // 障礙物最大距離
+double obstacle_min_dis_; // 障礙物最小距離
+
+double robot_yaw_; // 機器人朝向
+double speed_pid_k_; // 速度 PID 係數
+double target_yaw_; // 目標朝向
+
+double max_linear_acceleration_; // 最大線加速度
+double max_angular_acceleration_; // 最大角加速度
+double max_linear_velocity_; // 最大線速度
+double min_linear_velocity_; // 最小線速度
+double max_angular_velocity_; // 最大角速度
+double min_angular_velocity_; // 最小角速度
+double target_point_dis_; // 目標點距離
+
+double active_angular_; // 主動角速度
+
+int trajectory_num_; // 軌跡取樣數
+int trajectory_point_num_; // 每條軌跡點數
+double delta_t_; // 取樣時間間隔
+double statu_v_; // 狀態線速度
+double statu_w_; // 狀態角速度
+
+// 目標函數權重
+double obstable_dis_weight_; // 障礙物距離權重
+double target_heading_weight_; // 目標朝向權重
+double velocity_weight_; // 速度權重
+
+void TwistPublish(double x, double z); // 發布速度指令
+void moving_to_target_point(); // 跟隨路徑
+void moving_to_target_direction(); // 朝向目標方向
+void angle_normalize(double &angle); // 角度正規化
+void ElevatorStatusCheckCallService(ros::ServiceClient &client,campusrover_msgs::ElevatorStatusChecker &srv); // 電梯狀態檢查
+void InitialAccTrajectorySampling(); // 初始化加速度取樣
+double calculateClosestObstacleDistance(double x, double y); // 計算最近障礙物距離
+void VisualizePath(const std::vector<Eigen::Vector2d> &twist_pairs, double dt, int best_trajectory_id); // RViz 視覺化
+
+
+//-----------------------------------------------------------------------------------------------
+void get_parameters(ros::NodeHandle n_private)  // 取得參數，從 ROS 參數伺服器讀取所有控制參數，並初始化加速度取樣
+{
+    // 從參數伺服器取得機器人座標框架名稱，預設 base_link
+    n_private.param<string>("robot_frame", robot_frame_, "base_link");
+    
+    // 取得到達目標點的距離閾值，預設 0.2 公尺
+    n_private.param<double>("arriving_range_dis", arriving_range_dis_, 0.2);
+    
+    // 取得到達目標方向的角度閾值，預設 0.1 弧度
+    n_private.param<double>("arriving_range_angle", arriving_range_angle_, 0.1);
+
+    // 最大線加速度，預設 3.0
+    n_private.param<double>("max_linear_acceleration", max_linear_acceleration_, 3.0);
+    
+    // 最大角加速度，預設 8.0
+    n_private.param<double>("max_angular_acceleration", max_angular_acceleration_, 8.0);
+    
+    // 最大線速度，預設 1.0
+    n_private.param<double>("max_linear_velocity", max_linear_velocity_, 1.0);
+    
+    // 最小線速度，預設 0.0
+    n_private.param<double>("min_linear_velocity", min_linear_velocity_, 0.0);
+    
+    // 最大角速度，預設 1.0
+    n_private.param<double>("max_angular_velocity", max_angular_velocity_, 1.0);
+    
+    // 最小角速度，預設 1.0
+    n_private.param<double>("min_angular_velocity", min_angular_velocity_, 1.0);
+    
+    // 跟隨路徑時，目標點與機器人距離閾值，預設 1.0
+    n_private.param<double>("target_point_dis", target_point_dis_, 1.0);
+
+    // costmap 障礙物判斷閾值，預設 10
+    n_private.param<double>("threshold_occupied", threshold_occupied_, 10);
+    
+    // 機器人 footprint 最大/最小 x/y 範圍
+    n_private.param<double>("footprint_max_x", footprint_max_x_, 1.5);
+    n_private.param<double>("footprint_min_x", footprint_min_x_, -0.5);
+    n_private.param<double>("footprint_max_y", footprint_max_y_, 0.5);
+    n_private.param<double>("footprint_min_y", footprint_min_y_, -0.5);
+    
+    // 速度 PID 係數，預設 0.06
+    n_private.param<double>("speed_pid_k", speed_pid_k_, 0.06);
+
+    // 線速度與角度 profile 的最小/最大角度
+    n_private.param<double>("min_angle_of_linear_profile", min_angle_of_linear_profile_, 0.1);
+    n_private.param<double>("max_angle_of_linear_profile", max_angle_of_linear_profile_, 0.5);
+
+    // 是否啟用 costmap 障礙物、反向、線速度依賴角速度
+    n_private.param<bool>("enble_costmap_obstacle", enble_costmap_obstacle_, false);
+    n_private.param<bool>("direction_inverse", direction_inverse_, false);
+    n_private.param<bool>("enable_linear_depend_angular", enable_linear_depend_angular_, false);
+
+    // DWA 軌跡取樣數量、每條軌跡點數、取樣時間間隔
+    n_private.param<int>("trajectory_num", trajectory_num_, 44.0);
+    n_private.param<int>("trajectory_point_num", trajectory_point_num_, 10.0);
+    n_private.param<double>("delta_t", delta_t_, 0.3);
+    
+    // 目標函數權重
+    n_private.param<double>("obstable_dis_weight", obstable_dis_weight_, 1.2);
+    n_private.param<double>("target_heading_weight", target_heading_weight_, 1); 
+    n_private.param<double>("velocity_weight", velocity_weight_, 1);
+    
+    // 障礙物最大/最小距離
+    n_private.param<double>("obstacle_max_dis", obstacle_max_dis_, 2.0);
+    n_private.param<double>("obstacle_min_dis", obstacle_min_dis_, 0.5);
+    
+    // 狀態速度
+    n_private.param<double>("statu_v", statu_v_, 0.0);
+    n_private.param<double>("statu_w", statu_w_, 0.0);
+
+    // 初始化加速度取樣表
+    InitialAccTrajectorySampling();
+}
+//-----------------------------------------------------------------------------------------------
+// 初始化加速度取樣表，產生所有可能的線加速度與角加速度組合
+void InitialAccTrajectorySampling()
+{
+    // 依據設定的取樣數量，雙層迴圈產生所有加速度組合
+    for (int i = 0; i < trajectory_num_; i++)  // 外層迴圈，線加速度取樣
+    {
+        for (int j = 0; j < trajectory_num_ * 2.0; j++)  // 內層迴圈，角加速度取樣
+        {
+            // 計算線加速度與角加速度的取樣值
+            Eigen::Vector2d acc_pair(
+                -max_linear_acceleration_ + i * (2.0 * max_linear_acceleration_ / (trajectory_num_ - 1)),
+                -max_angular_acceleration_ + j * (2.0 * max_angular_acceleration_ / ((trajectory_num_ * 2.0) - 1))
+            );
+            // 將取樣結果存入 acc_pairs_ 向量 
+            acc_pairs_.push_back(acc_pair);
+        }
+    }
+}
+//-----------------------------------------------------------------------------------------------
+// 透過 TF 取得機器人在全域座標的即時姿態
+void UpdateCampusRoverPoseFromTF()  // 透過 TF 取得機器人在全域座標的即時姿態
+{
+    // 建立 TF2 buffer 與 listener
+    static tf2_ros::Buffer tfBuffer;
+    static tf2_ros::TransformListener tfListener(tfBuffer);
+    static geometry_msgs::TransformStamped transformStamped;
+    static double roll, pitch, yaw;
+    static double pre_yaw;
+
+    try {
+        // 查詢機器人當前在全域路徑座標系下的變換
+        transformStamped = tfBuffer.lookupTransform(globle_path_.header.frame_id, 
+                                                  robot_frame_, 
+                                                  ros::Time(0), 
+                                                  ros::Duration(2));
+    } catch (tf2::TransformException &ex) {
+        // 查詢失敗時警告
+        ROS_WARN(" %s. Can't update pose from TF, for that will be use the latest source point.", ex.what());
+    }
+
+    // 將查詢到的座標與姿態存入 robot_tf_pose_
+    robot_tf_pose_.position.x = transformStamped.transform.translation.x;
+    robot_tf_pose_.position.y = transformStamped.transform.translation.y;
+    robot_tf_pose_.position.z = transformStamped.transform.translation.z;
+    robot_tf_pose_.orientation.x = transformStamped.transform.rotation.x;
+    robot_tf_pose_.orientation.y = transformStamped.transform.rotation.y;
+    robot_tf_pose_.orientation.z = transformStamped.transform.rotation.z;
+    robot_tf_pose_.orientation.w = transformStamped.transform.rotation.w;
+
+    // 將四元數轉換為 roll, pitch, yaw
+    tf::Quaternion q(robot_tf_pose_.orientation.x,
+                    robot_tf_pose_.orientation.y,
+                    robot_tf_pose_.orientation.z,
+                    robot_tf_pose_.orientation.w);
+    tf::Matrix3x3 m(q);
+    
+    m.getRPY(roll, pitch, yaw);
+    if (!direction_inverse_) {
+        // 正向移動，直接取 yaw
+        pre_yaw = yaw;
+    } else {
+        // 反向移動，yaw 加 pi
+        pre_yaw = yaw + M_PI;
+        angle_normalize(pre_yaw);
+    }
+    robot_yaw_ = pre_yaw;
+}
+//-----------------------------------------------------------------------------------------------
+void check_arrive_point()  // 檢查是否到達目標點
+{
+    static double dist;
+
+    // 計算機器人當前位置與目標點之間的歐式距離
+    dist = sqrt(pow(target_pose_.pose.position.x - robot_tf_pose_.position.x, 2) +
+                pow(target_pose_.pose.position.y - robot_tf_pose_.position.y, 2));
+
+    // 如果與目標點的距離小於到達範圍閾值
+    if (dist < arriving_range_dis_) {
+        arriving_end_point_ = true;  // 設定已到達目標點
+    } else {
+        arriving_end_point_ = false;  // 設定尚未到達目標點
+    }
+}
+//-----------------------------------------------------------------------------------------------
+void check_arrive_direction()  // 檢查是否到達目標方向
+{
+    static double angle_error;        // 儲存計算出來的目標角度與目前角度的誤差
+    static double roll, pitch, yaw;   // 雖然未使用，但保留了 RPY 的變數（可做擴充）
+
+    angle_error = target_yaw_ - robot_yaw_;  // 計算目標方向與機器人目前朝向的角度誤差
+    angle_normalize(angle_error);    // 將角度誤差正規化到 [-π, π] 範圍
+
+    if (abs(angle_error) < arriving_range_angle_) {  // 如果角度誤差小於設定的角度容許值
+        arriving_end_direction_ = true;   // 設定旗標：表示機器人已對準目標方向
+
+        // 根據當前模式發送相應的狀態訊息
+        if (path_sub_mode_ == campusrover_msgs::PlannerFunction::Request::MODE_ELEVATOR_PATH) {
+            // 電梯導航模式
+            elevator_status_checker_msg_.request.node_name.data = "planner";
+            elevator_status_checker_msg_.request.status.data = arriving_end_direction_;
+            ElevatorStatusCheckCallService(elevator_status_check_client_, elevator_status_checker_msg_);
+        } else if (path_sub_mode_ == campusrover_msgs::PlannerFunction::Request::MODE_GLOBAL_PATH) {
+            // 一般全域導航模式
+            global_status_check_pub_.publish(global_status_checker_msg_);
+        }
+    } else {
+        arriving_end_direction_ = false;  // 未到達目標方向
+    }
+}
+
+//----------------------------------------------------------------------------------------------
+
+void TimerCallback(const ros::TimerEvent &event)  // 定時器 callback，負責主控制流程
+{
+    if (!action_flag_) {  // 如果未啟動則直接返回
+        return;
+    }
+    
+    if (path_sub_mode_ == campusrover_msgs::PlannerFunction::Request::MODE_BUTTON_PARKING) {  // 如果是按鈕停車模式
+        TwistPublish(max_linear_velocity_, active_angular_);  // 直接發布最大速度與主動角速度
+    } else {  // 其他模式
+        if (get_globle_path_) {  // 如果已取得全域路徑
+            if (get_velocity_data_) {  // 如果已取得速度資料
+                if (get_costmap_data_ || get_obstacle_data_ || !enble_costmap_obstacle_) {  // 如果有地圖、障礙物或未啟用 costmap 障礙物
+                    UpdateCampusRoverPoseFromTF();  // 更新機器人姿態
+                    if (!arriving_end_direction_) {  // 如果尚未到達目標方向
+                        if (!arriving_end_point_) {  // 如果尚未到達目標點
+                            check_arrive_point();  // 檢查是否到達目標點
+                            if (arriving_end_point_) {  // 如果到達目標點
+                                moving_to_target_direction();  // 進入朝向目標方向模式
+                                return;
+                            }
+                            moving_to_target_point();  // 否則繼續跟隨路徑
+                        } else {  // 如果已到達目標點
+                            check_arrive_direction();  // 檢查是否到達目標方向
+                            if (arriving_end_direction_) {  // 如果到達目標方向
+                                status_msg_ = 4;  // 狀態設為到達終點
+                                TwistPublish(0.0, 0.0);  // 停止移動
+                                return;
+                            }
+                            moving_to_target_direction();  // 否則繼續朝向目標方向
+                        }
+                    } else {  // 如果已到達目標方向
+                        status_msg_ = 4;  // 狀態設為到達終點
+                        TwistPublish(0.0, 0.0);  // 停止移動
+                    }
+                } else {  // 如果沒有地圖或障礙物資料
+                    status_msg_ = 2;  // 狀態設為等待地圖
+                    TwistPublish(0.0, 0.0);  // 停止移動
+                }
+            } else {  // 如果沒有速度資料
+                status_msg_ = 5;  // 狀態設為等待 odom
+                TwistPublish(0.0, 0.0);  // 停止移動
+            }
+        } else {  // 如果沒有全域路徑
+            status_msg_ = 1;  // 狀態設為等待路徑
+            TwistPublish(0.0, 0.0);  // 停止移動
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------------------------
+void msgs_timerCallback(const ros::TimerEvent &event)  // 狀態訊息定時提示 callback
+{
+    if (status_msg_ == 1) {  // 沒有路徑
+        ROS_WARN("dwa_planner : Without Globle Path to follow, Waiting for the Path input");
+        status_msg_ = 0;
+    } else if (status_msg_ == 2) {  // 沒有地圖
+        ROS_WARN("dwa_planner : Without costmap input , Waiting for the costmap input");
+        status_msg_ = 0;
+    } else if (status_msg_ == 3) {  // 偵測到障礙物
+        ROS_INFO("dwa_planner : detect obstacle");
+        status_msg_ = 0;
+    } else if (status_msg_ == 4) {  // 到達終點
+        ROS_INFO("dwa_planner : Arrival the destination");
+        status_msg_ = 0;
+    } else if (status_msg_ == 5) {  // 沒有 odom
+        ROS_INFO("dwa_planner : Without odom input , Waiting for the odom input");
+        status_msg_ = 0;
+    } else {  // 其他狀態
+        status_msg_ = 0;
+    }
+}
+
+//-----------------------------------------------------------------------------------------------
+void moving_to_target_point() // 跟隨路徑，選擇最近目標點並進行 DWA 取樣
+{
+    //find close point from globle path // 找出距離機器人最近的路徑點
+  // 找出距離機器人最近的路徑點
+  static double x_p ,y_p;         // 儲存每個路徑點的 x, y 座標
+  static double dist_fp_p;        // 儲存目前計算的距離（from path point to robot）
+  static double closest_dist;     // 最小距離（初始化時為第一個點距離）
+  static int closest_id;          // 最近路徑點的索引值
+
+
+  static double x_fp, y_fp;       // 後續用於儲存目標點座標（往前看的點）
+  static double looking_dist;     // 距離最近點的偏移距離（在路徑上的前進距離）
+  static int target_point_id;     // 目標點的 index（距離機器人一定距離以上的點）
+  geometry_msgs::PoseStamped target_pose; // ROS 標準 PoseStamped 結構，儲存我們要追蹤的點（含座標系）
+
+
+  for (int cp = 0; cp < globle_path_.poses.size(); cp++) // 遍歷全域路徑所有點
+  {
+    x_p = globle_path_.poses[cp].pose.position.x; /// 取得第 cp 個點的 x 座標
+    y_p = globle_path_.poses[cp].pose.position.y; // 取得第 cp 個點的 y 座標
+    // 計算這個點與機器人當前位置之間的歐式距離
+    dist_fp_p = sqrt(pow(robot_tf_pose_.position.x - x_p,2) + pow(robot_tf_pose_.position.y - y_p,2)); 
+        if (cp == 0) // 第一次（第一個點）
+    {
+      closest_dist = dist_fp_p;  // 初始化最近距離
+      closest_id = cp;           // 記錄目前點的 index
+    }
+    else if (dist_fp_p < closest_dist) // 如果發現更近的距離
+    {
+      closest_dist = dist_fp_p;  // 更新最近距離
+      closest_id = cp;           // 更新最近點的 index
+    }
+  }
+
+  
+  //std::cout << "closest_id : " << closest_id<<" new_path_ : " << new_path_<<'\n';
+  if (closest_id >= globle_path_.poses.size() - 1) // 如果已到達路徑終點
+  {
+    target_point_id = closest_id; // 目標點設為終點
+  }
+  else
+  {
+    //find the target point from globle path for following // 從最近點往前找一個距離夠遠的目標點
+
+    for(int fp = closest_id;fp<globle_path_.poses.size();fp++) // 從最近點往後搜尋
+    {
+      target_point_id = fp; // 設定目前目標點
+      x_fp = globle_path_.poses[fp].pose.position.x; // 取得 x
+      y_fp = globle_path_.poses[fp].pose.position.y; // 取得 y
+      looking_dist = sqrt(pow(x_fp - globle_path_.poses[closest_id].pose.position.x, 2) 
+                          + pow(y_fp - globle_path_.poses[closest_id].pose.position.y, 2)); // 計算與最近點距離
+    
+      if(looking_dist >= target_point_dis_) // 如果距離超過閾值
+      {
+        break; // 停止搜尋
+      }
+    }
+    // cout<< "closest_id : " << closest_id<<"target_point_id"<<target_point_id<<endl;
+  }
+
+  target_pose.header.frame_id = globle_path_.header.frame_id; // 設定目標點座標框架
+  target_pose.pose.position.x = globle_path_.poses[target_point_id].pose.position.x; // 設定 x
+  target_pose.pose.position.y = globle_path_.poses[target_point_id].pose.position.y; // 設定 y
+  target_pose.pose.position.z = globle_path_.poses[target_point_id].pose.position.z; // 設定 z
+
+  // cout<< "target_point_"<<target_pose<<endl;
+  //twist control pair Trajectory Sampling // 速度取樣
+  
+  double statu_v, statu_w; // 狀態速度
+
+  if(statu_v_+ max_linear_acceleration_*delta_t_> max_linear_velocity_) // 若加速後超過最大速度
+  {
+    statu_v = max_linear_velocity_-max_linear_acceleration_*delta_t_; // 限制最大速度
+  }
+  else if(statu_v_- max_linear_acceleration_*delta_t_ < min_linear_velocity_) // 若減速後低於最小速度
+  {
+    statu_v = min_linear_velocity_+max_linear_acceleration_*delta_t_; // 限制最小速度
+  }
+  else
+  {
+    statu_v = statu_v_; // 設定當前線速度狀態為儲存的線速度值
+  }
+
+  statu_w = statu_w_; // 設定當前角速度狀態為儲存的角速度值
+
+  twist_pairs_.clear(); // 清空速度組合向量，準備重新計算
+
+  for(int i=0;i < acc_pairs_.size();i++) // 遍歷所有加速度組合
+  {
+    Eigen::Vector2d twist_pair(statu_v + acc_pairs_[i](0)*delta_t_, // 計算線速度：當前速度加上加速度乘以時間
+                              statu_w + acc_pairs_[i](1)*delta_t_*3.0); // 計算角速度：當前角速度加上角加速度乘以時間（乘3.0為調整係數）
+    twist_pairs_.push_back(twist_pair); // 將計算出的速度組合加入向量
+  }
+
+  //Objective Function // 目標函數相關變數宣告
+  double ob_closest_dist; // 最近障礙物距離
+  double ob_dis; // 障礙物距離
+  double step_dis, step_theta, theta; // 步進距離、角度步進、當前角度
+  double s_x,s_y; // 模擬位置座標
+  Eigen::Vector3d function_value; // 目標函數值向量（3維：障礙物距離、朝向目標、速度）
+  std::vector<Eigen::Vector3d> objective_function_values;; // 儲存所有軌跡的目標函數值
+  double t_x, t_y; // 目標點座標
+  double tg_angle; // 目標角度
+  static tf2_ros::Buffer tfBuffer; // TF緩衝區
+  static tf2_ros::TransformListener tfListener(tfBuffer); // TF監聽器
+  static geometry_msgs::PoseStamped target_points_b; // 機器人座標系中的目標點位姿
+  static geometry_msgs::PoseStamped target_points_g; // 全域座標系中的目標點位姿
+  double max_ob_dis; // 最大障礙物距離
+  double max_tg_angle; // 最大目標角度差
+  double max_velocity; // 最大速度
+  double best_reward; // 最佳評分
+  int best_id; // 最佳軌跡編號
+  double objective_function_sum; // 目標函數總和
+
+  for(int p=0; p < twist_pairs_.size(); p++)
+  {
+    //Obstacle Distance Function // 計算障礙物距離函數
+    if(twist_pairs_[p](0)*delta_t_ == 0){ // 如果線速度為零
+      step_dis = (0.01)/trajectory_point_num_; // 設定最小步進距離
+      step_theta = (twist_pairs_[p](1)*delta_t_)/trajectory_point_num_;  // 計算角度步進
+    }else{ // 如果線速度不為零
+      step_dis = (twist_pairs_[p](0)*delta_t_*12.0)/trajectory_point_num_; // 計算步進距離（乘12.0為調整係數）
+      step_theta = (twist_pairs_[p](1)*delta_t_*2.0)/trajectory_point_num_;  // 計算角度步進（乘2.0為調整係數）
+    }
+
+    s_x = s_y = 0; // 初始化模擬起始位置
+    theta = step_theta; // 設定初始角度
+    ob_closest_dist = 1000000.0; // 初始化最近障礙物距離為一個很大的值
+    for (int j = 0; j < trajectory_point_num_; j++) // 遍歷軌跡上的所有點
+    {
+      s_x = s_x + step_dis*cos(theta); // 計算下一個點的x座標
+      s_y = s_y + step_dis*sin(theta); // 計算下一個點的y座標
+      theta = theta + step_theta; // 更新角度
+      ob_dis = calculateClosestObstacleDistance(s_x, s_y); // 計算該點到最近障礙物的距離
+      
+      if(ob_dis < ob_closest_dist) // 如果找到更近的障礙物
+        ob_closest_dist = ob_dis; // 更新最近障礙物距離
+      
+    }
+
+    if(ob_closest_dist > obstacle_max_dis_) // 如果障礙物距離超過最大閾值
+    {
+      ob_closest_dist = obstacle_max_dis_; // 將距離限制在最大閾值
+    }
+    else if(ob_closest_dist < obstacle_min_dis_) // 如果障礙物距離小於最小閾值
+    {
+      ob_closest_dist = -1; // 設為-1表示該路徑不可行
+    }
+        
+
+    if(p == 0) // 如果是第一條軌跡
+    {
+      max_ob_dis = ob_closest_dist; // 初始化最大障礙物距離
+    }
+    else
+    {
+      if( ob_closest_dist > max_ob_dis) // 如果找到更大的障礙物距離
+      {
+        max_ob_dis = ob_closest_dist; // 更新最大障礙物距離
+      }
+    }
+    
+    function_value(0) = ob_closest_dist; // 將障礙物距離存入目標函數值的第一維
+
+
+    //Heading Function // 計算朝向目標的評分函數
+    target_points_g.header.frame_id = globle_path_.header.frame_id; // 設定目標點的座標系為全域路徑座標系
+    target_points_g.pose.position.x = target_pose.pose.position.x; // 設定目標點x座標
+    target_points_g.pose.position.y = target_pose.pose.position.y; // 設定目標點y座標
+    try // 嘗試進行座標轉換
+    {
+      tfBuffer.transform(target_points_g, target_points_b, robot_frame_, ros::Duration(2.0)); // 將目標點從全域座標系轉換到機器人座標系
+    }
+    catch (tf2::TransformException &ex) // 捕獲座標轉換異常
+    {
+      ROS_WARN("ob : %s", ex.what()); // 輸出警告訊息
+      return; // 返回
+    }
+    double target_angle = atan2(target_points_b.pose.position.y // 計算目標點在機器人座標系中的角度
+                                ,target_points_b.pose.position.x);
+    angle_normalize(target_angle); // 將角度正規化到[-π, π]範圍
+    
+    tg_angle = abs(target_angle - twist_pairs_[p](1)*delta_t_); // 計算目標角度與預測角度的差值的絕對值
+
+    // cout<< "target_angle : " << target_angle<<" point_angle"<<twist_pairs_[p](1)*delta_t_<<" tg_angle"<<tg_angle<<endl;
+    // cout<<" tg_angle : "<<tg_angle<<endl;
+
+    angle_normalize(tg_angle); // 將角度差值正規化
+    
+    if(p == 0) // 如果是第一條軌跡
+    {
+      max_tg_angle = tg_angle; // 初始化最大角度差值
+    }
+    else
+    {
+      if( tg_angle > max_tg_angle) // 如果找到更大的角度差值
+      {
+        max_tg_angle = tg_angle; // 更新最大角度差值
+      }
+    } 
+    function_value(1) = tg_angle; // 將目標角度差值存入目標函數值的第二維
+    
+    
+
+    //Velocity Function // 速度評分函數
+    function_value(2) = twist_pairs_[p](0); // 將線速度值存入目標函數值的第三維
+
+    if(p == 0) // 如果是第一條軌跡
+    {
+      max_velocity = twist_pairs_[p](0); // 初始化最大速度
+    }
+    else
+    {
+      if(twist_pairs_[p](0) > max_velocity) // 如果找到更大的速度
+      {
+        max_velocity = twist_pairs_[p](0); // 更新最大速度
+      }
+    } 
+
+    objective_function_values.push_back(function_value); // 將該軌跡的三個評分值加入評分向量
+  }
+
+  //renormolized // 正規化處理
+
+  bool best_id_founded = false; // 標記是否找到最佳軌跡
+
+  for(int f=0;f<objective_function_values.size();f++) // 遍歷所有軌跡的評分
+  {
+    if(objective_function_values[f](0) >= 0) // 如果障礙物距離評分有效（不是-1）
+    {
+      // 正規化三個評分指標並乘上對應權重
+      objective_function_values[f](0) = obstable_dis_weight_ * (objective_function_values[f](0)/max_ob_dis); // 障礙物距離評分正規化
+      objective_function_values[f](1) = target_heading_weight_ * (1.0 - (objective_function_values[f](1)/max_tg_angle)); // 目標朝向評分正規化
+      objective_function_values[f](2) = velocity_weight_ * (objective_function_values[f](2)/max_velocity); // 速度評分正規化
+
+      objective_function_sum = objective_function_values[f](0) + objective_function_values[f](1) + objective_function_values[f](2); // 計算總評分
+
+      if(!best_id_founded) // 如果還沒有找到最佳軌跡
+      {
+        best_reward = objective_function_sum; // 設定當前評分為最佳評分
+        best_id = f; // 記錄當前軌跡編號
+        best_id_founded = true; // 標記已找到一個有效軌跡
+      }
+      else
+      {
+        if(objective_function_sum > best_reward) // 如果找到更好的評分
+        {
+          best_reward = objective_function_sum; // 更新最佳評分
+          best_id = f;  // 更新最佳軌跡編號
+        }
+      }
+    }
+  }
+  double len_vel; // 最終輸出的線速度
+  double min_reduce_dis = 0.8; // 開始減速的距離閾值
+  double target_dist = sqrt(pow(globle_path_.poses[globle_path_.poses.size()-1].pose.position.x - robot_tf_pose_.position.x, 2) // 計算到終點的距離
+                          + pow(globle_path_.poses[globle_path_.poses.size()-1].pose.position.y - robot_tf_pose_.position.y, 2));
+  
+  if(best_id_founded){ // 如果找到了最佳軌跡
+    if(target_dist < min_reduce_dis) // 如果距離終點較近，需要減速
+    {
+      if(target_dist/min_reduce_dis > 1.0) // 如果距離比閾值大
+      {
+        len_vel = twist_pairs_[best_id](0); // 使用原始速度
+      }
+      else if(target_dist/min_reduce_dis < 0.1) // 如果距離很近
+      {
+        len_vel = twist_pairs_[best_id](0)*0.3; // 降低到原始速度的30%
+      }
+      else // 距離適中
+      {
+        len_vel = twist_pairs_[best_id](0)*0.8; // 降低到原始速度的80%
+      }
+      TwistPublish(len_vel, twist_pairs_[best_id](1)); // 發布減速後的速度指令
+    }else{ // 距離終點還遠
+      TwistPublish(twist_pairs_[best_id](0), twist_pairs_[best_id](1)); // 發布原始速度指令
+    }
+    
+  }else{
+    TwistPublish(0.0,0.0);
+  }
+
+  VisualizePath(twist_pairs_, delta_t_*12.0, best_id); // 在RViz中可視化所有軌跡，突出顯示最佳軌跡
+}
+//-----------------------------------------------------------------------------------------------
+void moving_to_target_direction() // 朝向目標方向旋轉的函數
+{
+  static double yaw_error; // 偏航角誤差
+  static double ang_vel; // 角速度
+
+  yaw_error = target_yaw_ - robot_yaw_; // 計算目標偏航角與當前偏航角的差值
+  angle_normalize(yaw_error); // 將角度誤差正規化到[-π, π]範圍
+
+  ang_vel = yaw_error*speed_pid_k_; // 使用比例控制計算角速度
+  
+  if(ang_vel > 0 && ang_vel < min_angular_velocity_) // 如果正向角速度太小
+  {
+    ang_vel = min_angular_velocity_; // 設為最小角速度
+  }
+  else if(ang_vel < 0 && ang_vel > -min_angular_velocity_) // 如果反向角速度太小
+  {
+    ang_vel = -min_angular_velocity_; // 設為最小負角速度
+  }
+
+  TwistPublish(0.0, ang_vel); // 發布角速度指令，線速度為0
+}
+//-----------------------------------------------------------------------------------------------
+void TwistPublish(double x, double z) // 發布速度指令的函數
+{
+  static geometry_msgs::Twist pub_twist; // 用於發布的速度消息
+
+  // if(abs(z) < min_angular_velocity_)
+  // {
+  //   z = z * 0.5;
+  // }
+
+  if(z > max_angular_velocity_) // 如果角速度超過最大值
+  {
+    pub_twist.angular.z = max_angular_velocity_; // 限制為最大角速度
+  }
+  else if(z < -max_angular_velocity_) // 如果角速度小於最小值
+  {
+    pub_twist.angular.z = -max_angular_velocity_; // 限制為最小角速度
+  }
+  else // 角速度在允許範圍內
+  {
+    pub_twist.angular.z = z; // 直接使用輸入的角速度
+  }
+
+  if(abs(z) > max_angular_velocity_*0.7) // 如果角速度大於最大值的70%
+  {
+    pub_twist.linear.x = x*(1-((abs(z)-(max_angular_velocity_*0.7))/2.0*(max_angular_velocity_))); // 根據角速度大小降低線速度
+  }else // 角速度較小時
+  {
+    pub_twist.linear.x = x; // 直接使用輸入的線速度
+  }
+  
+  //make_twist_path(pub_twist.linear.x, pub_twist.angular.z);
+  twist_pub_.publish(pub_twist); // 發布速度指令到話題
+}
+//-----------------------------------------------------------------------------------------------
+void angle_normalize(double &angle) // 角度正規化函數，將角度限制在[-π, π]範圍內
+{
+  if(angle > M_PI) // 如果角度大於π
+  {
+    angle = -2*M_PI + angle; // 減去2π
+  }else if(angle < -M_PI) // 如果角度小於-π
+  {
+    angle = 2*M_PI + angle; // 加上2π
+  }
+}
+//-----------------------------------------------------------------------------------------------
+// 電梯模式下的路徑接收回呼函式
+void ElevatorPathCallback(const nav_msgs::PathConstPtr &path)
+{
+  static geometry_msgs::PoseStamped pose; // 用來暫存每個路徑點的 Pose
+  static double roll, pitch, yaw;         // 用來儲存轉換後的歐拉角（roll, pitch, yaw）
+
+  // 如果當前模式不是電梯路徑模式，就不處理這份路徑資料
+  if(path_sub_mode_ != campusrover_msgs::PlannerFunction::Request::MODE_ELEVATOR_PATH)
+  {
+    return; // 結束函式
+  }
+
+  // 如果收到的 path 是空的（沒有任何路徑點），就不處理
+  if(path->poses.size() == 0)
+  {
+    return;
+  }
+
+  // 將接收到的 path 的座標框架（例如 "map"）儲存到全域路徑的 header
+  globle_path_.header.frame_id = path->header.frame_id;
+
+  // 清空之前的路徑資料，準備儲存新的 path
+  globle_path_.poses.clear();
+
+  // 遍歷接收到的 path 裡所有的路徑點
+  for (int i = 0; i < path->poses.size(); i++)
+  {
+    // 將每一個點的位置資訊複製到暫存的 pose
+    pose.pose.position.x = path->poses[i].pose.position.x;
+    pose.pose.position.y = path->poses[i].pose.position.y;
+    pose.pose.position.z = path->poses[i].pose.position.z;
+
+    // 將每一個點的姿態（四元數）資訊也複製進來
+    pose.pose.orientation.x = path->poses[i].pose.orientation.x;
+    pose.pose.orientation.y = path->poses[i].pose.orientation.y;
+    pose.pose.orientation.z = path->poses[i].pose.orientation.z;
+    pose.pose.orientation.w = path->poses[i].pose.orientation.w;
+
+    // 把這個點加入到全域路徑陣列中
+    globle_path_.poses.push_back(pose);
+
+    // 如果是最後一個點（目標點）
+    if(i == path->poses.size() - 1)
+    {
+      // 設定最終目標點（target_pose_）為這個點
+      target_pose_.header.frame_id = path->header.frame_id;
+      target_pose_.pose.position = path->poses[i].pose.position;
+      target_pose_.pose.orientation = path->poses[i].pose.orientation;
+    }
+  }
+
+  // 將目標點的四元數轉換為歐拉角，以取得目標的 yaw（朝向角度）
+  tf::Quaternion q(target_pose_.pose.orientation.x,
+                   target_pose_.pose.orientation.y,
+                   target_pose_.pose.orientation.z,
+                   target_pose_.pose.orientation.w);
+  tf::Matrix3x3 m(q);
+  m.getRPY(roll, pitch, yaw); // 將四元數轉為 roll, pitch, yaw
+
+  // 將目標方向儲存到全域變數 target_yaw_
+  target_yaw_ = yaw;
+
+  // 設定路徑已成功接收的旗標，讓主控制流程可以開始進行導航
+  get_globle_path_ = true;
+}
+
+//-----------------------------------------------------------------------------------------------
+// 全域路徑的回呼函式：接收 /global_path 話題後更新目標路徑與目標姿態
+void GlobalPathCallback(const nav_msgs::PathConstPtr &path)
+{
+  static geometry_msgs::PoseStamped pose; // 暫存每個路徑點的 Pose
+  static double roll, pitch, yaw;         // 用於將四元數轉換為歐拉角（roll, pitch, yaw）
+
+  // 若要限制只在全域模式處理，可打開這段（目前為註解狀態）
+  // if(path_sub_mode_ != campusrover_msgs::PlannerFunction::Request::MODE_GLOBAL_PATH)
+  // {
+  //   return; // 如果不是全域模式，直接跳出
+  // }
+
+  // 若接收到的 path 中沒有任何點，直接忽略
+  if(path->poses.size() == 0)
+  {
+    return;
+  }
+
+  // 設定全域路徑的參考座標系（例如 "map" 或 "odom"）
+  globle_path_.header.frame_id = path->header.frame_id;
+
+  // 清除先前儲存的全域路徑點，準備接收新的
+  globle_path_.poses.clear();
+
+  // 遍歷接收到的所有 Pose 資料
+  for (int i = 0; i < path->poses.size(); i++)
+  {
+    // 將位置資訊從輸入 path 複製到暫存 pose
+    pose.pose.position.x = path->poses[i].pose.position.x;
+    pose.pose.position.y = path->poses[i].pose.position.y;
+    pose.pose.position.z = path->poses[i].pose.position.z;
+
+    // 將姿態（四元數）資訊也複製進來
+    pose.pose.orientation.x = path->poses[i].pose.orientation.x;
+    pose.pose.orientation.y = path->poses[i].pose.orientation.y;
+    pose.pose.orientation.z = path->poses[i].pose.orientation.z;
+    pose.pose.orientation.w = path->poses[i].pose.orientation.w;
+
+    // 加入到全域路徑向量中
+    globle_path_.poses.push_back(pose);
+
+    // 若是最後一個點，設為目標位置
+    if(i == path->poses.size() - 1)
+    {
+      target_pose_.header.frame_id = path->header.frame_id;              // 設定目標點參考座標系
+      target_pose_.pose.position = path->poses[i].pose.position;         // 設定目標位置
+      target_pose_.pose.orientation = path->poses[i].pose.orientation;   // 設定目標朝向（四元數）
+    }
+  }
+
+  // 從四元數轉換為歐拉角（取得目標朝向的 yaw）
+  tf::Quaternion q( target_pose_.pose.orientation.x,
+                    target_pose_.pose.orientation.y,
+                    target_pose_.pose.orientation.z,
+                    target_pose_.pose.orientation.w);
+  tf::Matrix3x3 m(q);
+  m.getRPY(roll, pitch, yaw); // 取得 roll, pitch, yaw（這裡只需要 yaw）
+
+  // 將 yaw 存為目標朝向角度，供導航使用
+  target_yaw_ = yaw;
+
+  // 若是第一次接收到全域路徑，輸出提示訊息
+  if(get_globle_path_ == false){
+    ROS_INFO("dwa_planner : Get the globle path input!!");
+  }
+
+  // 設定路徑已接收完成，主控制流程可以開始導航
+  get_globle_path_ = true;
+}
+
+//-----------------------------------------------------------------------------------------------
+// costmap 回呼函式：接收 occupancy grid 格式地圖，分析障礙物位置
+void CostmapCallback(const nav_msgs::OccupancyGridConstPtr &map)
+{
+  geometry_msgs::Pose ob_pose;                // 存放障礙物在 base frame 中的簡單座標
+  geometry_msgs::PoseStamped ob_posestamped;  // 存放障礙物原始座標（包含 frame_id）
+  geometry_msgs::PoseStamped base_ob_pose;    // 轉換成機器人 frame 的障礙物 pose
+
+  static tf2_ros::Buffer tfBuffer;            // TF2 轉換用的 buffer
+  static tf2_ros::TransformListener tfListener(tfBuffer); // 監聽 TF 座標變換
+  static geometry_msgs::TransformStamped transformStamped; // 暫存轉換結果
+
+  double data;   // costmap 中每格的值（-1:unknown, 0:free, 100:occupied）
+  double value;  // 對應 index 值
+
+  // 如果未啟用 costmap 障礙物功能，直接跳出
+  if(!enble_costmap_obstacle_)
+    return;
+
+  // 儲存解析度（每格幾公尺），供後續障礙物位置換算使用
+  costmap_data_.info.resolution = map->info.resolution;
+
+  // 清除之前儲存的障礙物座標
+  obstacle_poses_.poses.clear();
+
+  // ============================== CASE 1：地圖與機器人座標系相同 ==============================
+  if (map->header.frame_id == robot_frame_)
+  {
+    for (int i = 0; i < map->data.size(); i++) // 遍歷每一格
+    {
+      data = map->data[i]; // 取得格子的值（0~100）
+      value = i;           // 索引值
+
+      if (abs(data) > threshold_occupied_) // 超過占據閾值，視為障礙物
+      {
+        // 將 1D 索引轉換為 2D 格子位置 → 再換算為世界座標
+        ob_pose.position.y = (floor(value / map->info.width) * map->info.resolution) + map->info.origin.position.y;
+        ob_pose.position.x = ((value - map->info.width * floor(value / map->info.width)) * map->info.resolution) + map->info.origin.position.x;
+
+        // 判斷是否進入機器人 footprint 區域
+        if (ob_pose.position.x < footprint_max_x_ && ob_pose.position.x > footprint_min_x_ &&
+            ob_pose.position.y < footprint_max_y_ && ob_pose.position.y > footprint_min_y_)
+        {
+          obstacle_stop_cmd_ = true;  // 設定旗標要求停止
+          status_msg_ = 3;            // 訊息代碼 3：偵測到障礙物
+          break;                      // 一旦進入 footprint 就停止處理（避免多餘運算）
+        }
+        else
+        {
+          obstacle_stop_cmd_ = false; // 沒進入 footprint，清除停止指令
+        }
+
+        // 將障礙物儲存進列表，用於後續軌跡評估
+        obstacle_poses_.poses.push_back(ob_pose);
+      }
+    }
+  }
+
+  // ============================== CASE 2：地圖與機器人座標系不同（需 TF 轉換） ==============================
+  else
+  {
+    ob_posestamped.header.frame_id = map->header.frame_id; // 設定原始 frame
+
+    for (int i = 0; i < map->data.size(); i++) // 遍歷每一格
+    {
+      data = map->data[i];
+
+      if (abs(data) > threshold_occupied_) // 超過閾值，視為障礙物
+      {
+        value = i;
+
+        // 計算原始世界座標（還不是 base frame）
+        ob_posestamped.pose.position.y = (floor(value / map->info.width) * map->info.resolution) + map->info.origin.position.y;
+        ob_posestamped.pose.position.x = ((value - map->info.width * floor(value / map->info.width)) * map->info.resolution) + map->info.origin.position.x;
+
+        // 嘗試將該點從地圖 frame 轉換到機器人 base frame
+        try
+        {
+          tfBuffer.transform(ob_posestamped, base_ob_pose, robot_frame_, ros::Duration(2.0));
+        }
+        catch (tf2::TransformException &ex)
+        {
+          ROS_WARN("ob : %s", ex.what()); // 若轉換失敗則跳過
+          return;
+        }
+
+        // 更新轉換後的障礙物座標
+        ob_pose.position.y = base_ob_pose.pose.position.y;
+        ob_pose.position.x = base_ob_pose.pose.position.x;
+
+        // 檢查是否進入 footprint
+        if (ob_pose.position.x < footprint_max_x_ && ob_pose.position.x > footprint_min_x_ &&
+            ob_pose.position.y < footprint_max_y_ && ob_pose.position.y > footprint_min_y_)
+        {
+          obstacle_stop_cmd_ = true;  // 要求停止
+          status_msg_ = 3;            // 更新狀態碼
+          break;
+        }
+        else
+        {
+          obstacle_stop_cmd_ = false;
+        }
+
+        // 儲存障礙物座標
+        obstacle_poses_.poses.push_back(ob_pose);
+      }
+    }
+  }
+
+  // 若第一次接收到 costmap，顯示提示訊息
+  if(get_costmap_data_ == false){
+    ROS_INFO("dwa_planner : Get the Costmap input!!");
+  }
+
+  // 設定 costmap 資料已接收
+  get_costmap_data_ = true;
+}
+
+//-----------------------------------------------------------------------------------------------
+// 當訂閱到 odometry 資料時會呼叫此函式，用來取得機器人的實際速度
+void OdomCallback(const nav_msgs::OdometryConstPtr &odom)
+{
+  // 取得目前機器人的線速度（x 方向）
+  current_v_ = odom->twist.twist.linear.x;
+
+  // 取得目前機器人的角速度（z 軸旋轉）
+  current_w_ = odom->twist.twist.angular.z;
+
+  // 如果是第一次接收到 odom，印出提示資訊
+  if(get_velocity_data_ == false){
+    ROS_INFO("dwa_planner : Get the Odom input!!");
+  }
+
+  // 設定旗標，表示 odom 資料已成功接收
+  get_velocity_data_ = true;
+}
+
+//-----------------------------------------------------------------------------------------------
+// 回呼函式：處理從 costmap_converter 發布的障礙物陣列訊息
+void CB_customObstacle(const costmap_converter::ObstacleArrayMsg::ConstPtr& obst_msg)
+{
+  // 建立 TF2 轉換工具，用於不同座標系之間的轉換
+  static tf2_ros::Buffer tfBuffer;
+  static tf2_ros::TransformListener tfListener(tfBuffer);
+
+  geometry_msgs::Pose ob_pose;                // 用於儲存障礙物座標（無 frame）
+  geometry_msgs::PoseStamped obstacle_r;      // 機器人底座 frame 中的 pose（轉換後）
+  geometry_msgs::PoseStamped obstacle_g;      // 原始 frame 中的 pose（需轉換）
+
+  // 清除上一輪的障礙物資料，準備儲存新的
+  obstacle_poses_.poses.clear();
+
+  // ============================== CASE 1：若障礙物與機器人在同一座標系 ==============================
+  if (obst_msg->header.frame_id == robot_frame_)
+  {
+    for(int i = 0; i < obst_msg->obstacles.size(); i++) // 遍歷每一個障礙物
+    {
+      // 取第一個頂點（通常是代表障礙物中心或某邊界點）
+      ob_pose.position.x = obst_msg->obstacles[i].polygon.points[0].x;
+      ob_pose.position.y = obst_msg->obstacles[i].polygon.points[0].y;    
+
+      // 加入到障礙物清單中
+      obstacle_poses_.poses.push_back(ob_pose);
+    }
+  }
+
+  // ============================== CASE 2：障礙物與機器人不在同一座標系（需轉換） ==============================
+  else
+  {
+    for(int i = 0; i < obst_msg->obstacles.size(); i++) // 遍歷每一個障礙物
+    {
+      // 設定障礙物原始座標系與座標點
+      obstacle_g.header.frame_id = obst_msg->obstacles[i].header.frame_id;
+      obstacle_g.pose.position.x = obst_msg->obstacles[i].polygon.points[0].x;
+      obstacle_g.pose.position.y = obst_msg->obstacles[i].polygon.points[0].y;
+
+      try
+      {
+        // 嘗試將該障礙物座標轉換為 robot_frame 座標系下的位置
+        tfBuffer.transform(obstacle_g, obstacle_r, robot_frame_, ros::Duration(2.0));
+      }
+      catch (tf2::TransformException &ex)
+      {
+        // 若轉換失敗，印出警告並跳出（避免錯誤資料導致導航失敗）
+        ROS_WARN("ob : %s", ex.what());
+        return;
+      }
+
+      // 將轉換後的障礙物位置儲存
+      ob_pose.position.x = obstacle_r.pose.position.x;
+      ob_pose.position.y = obstacle_r.pose.position.y;
+
+      // 加入清單中
+      obstacle_poses_.poses.push_back(ob_pose);
+    }
+  }
+
+  // 成功接收到自訂障礙物資料，設定旗標為 true
+  get_obstacle_data_ = true;
+}
+
+//-----------------------------------------------------------------------------------------------
+// 根據給定的速度與時間，預測機器人未來的相對位置與朝向（回傳 Pose）
+geometry_msgs::Pose predictPosition(double v_x, double v_w, double d_t)
+{
+  static geometry_msgs::Pose predict_pose;              // 儲存預測的位置與姿態
+  static tf2::Quaternion pose_q_tf;                     // TF 格式的四元數（用來產生旋轉）
+  static geometry_msgs::Quaternion pose_q_msg;          // ROS 標準格式的四元數
+  double d_angle;                                       // delta angle = v_w * d_t（旋轉角）
+
+  // ============================== CASE 1：只有線速度，無角速度（直線前進） ==============================
+  if(v_w == 0)
+  {
+    predict_pose.position.x = v_x * d_t; // 沿 x 軸向前移動
+    predict_pose.position.y = 0;         // y 方向無變化
+    predict_pose.position.z = 0;         // z 不考慮高度變化（2D）
+
+    pose_q_tf.setRPY(0.0, 0.0, 0.0);     // 朝向不變
+    pose_q_msg = tf2::toMsg(pose_q_tf); // 轉成 ROS 四元數格式
+
+    predict_pose.orientation = pose_q_msg; // 設定姿態
+  }
+
+  // ============================== CASE 2：只有角速度，無線速度（原地旋轉） ==============================
+  else if(v_x == 0)
+  {
+    d_angle = v_w * d_t;                         // 計算旋轉角度
+    pose_q_tf.setRPY(0.0, 0.0, d_angle);         // 產生旋轉四元數（繞 Z 軸）
+    pose_q_msg = tf2::toMsg(pose_q_tf);
+
+    predict_pose.position.x = 0;                // 原地不動
+    predict_pose.position.y = 0;
+    predict_pose.position.z = 0;
+    predict_pose.orientation = pose_q_msg;      // 只設定角度
+  }
+
+  // ============================== CASE 3：同時有線與角速度（曲線前進） ==============================
+  else
+  {
+    d_angle = v_w * d_t;                         // 計算旋轉角
+    pose_q_tf.setRPY(0.0, 0.0, d_angle);         // 產生朝向
+    pose_q_msg = tf2::toMsg(pose_q_tf);
+
+    // 根據旋轉角度，計算曲線位移後的 x, y
+    predict_pose.position.x = v_x * d_t * cos(d_angle);
+    predict_pose.position.y = v_x * d_t * sin(d_angle);
+    predict_pose.orientation = pose_q_msg;      // 設定預測姿態
+  }
+
+  return predict_pose; // 回傳預測結果（包含位置與朝向）
+}
+
+//-----------------------------------------------------------------------------------------------
+// 計算座標點 (x, y) 到所有障礙物的最短距離（用於目標函數評估）
+double calculateClosestObstacleDistance(double x, double y)
+{
+  double closestdist = 1000000.0; // 初始值設為很大，代表尚未找到最近距離
+  static double dis;              // 暫存每次計算的距離
+
+  for (int i = 0; i < obstacle_poses_.poses.size(); i++) // 遍歷所有障礙物位置
+  {
+    // 使用歐氏距離公式計算距離
+    dis = sqrt(
+      pow(obstacle_poses_.poses[i].position.x - x, 2.0) +
+      pow(obstacle_poses_.poses[i].position.y - y, 2.0)
+    );
+
+    if(dis < closestdist) // 如果當前距離比最短距離還短
+    {
+      closestdist = dis;  // 更新最短距離
+    }
+  }
+
+  return closestdist; // 回傳最短距離（可能用於評分判斷）
+}
+
+//-----------------------------------------------------------------------------------------------
+// 在 RViz 中畫出所有 DWA 模擬的速度軌跡（候選路徑）
+// twist_pairs：每一條軌跡對應的 (v, w)
+// dt：模擬時間長度
+// best_trajectory_id：最佳軌跡的 index，用綠色標出
+void VisualizePath(const std::vector<Eigen::Vector2d> &twist_pairs, double dt, int best_trajectory_id)
+{
+  visualization_msgs::MarkerArray all_rollOuts;       // 儲存所有要畫的軌跡線條
+  visualization_msgs::Marker lane_waypoint_marker;    // 單一條軌跡用的 marker
+
+  double s_x, s_y;   // 模擬的當前位置（相對座標）
+  double theta;      // 模擬的當前角度（yaw）
+
+  // 初始化每條軌跡的 marker 參數
+  lane_waypoint_marker.header.frame_id = robot_frame_; // 使用機器人 base frame
+  lane_waypoint_marker.header.stamp = ros::Time(0);    // 設定時間戳為 0（即時）
+  lane_waypoint_marker.ns = "path_array_marker";       // marker 命名空間
+  lane_waypoint_marker.type = visualization_msgs::Marker::LINE_STRIP; // 線段集合
+  lane_waypoint_marker.action = visualization_msgs::Marker::ADD;      // 新增 marker
+  lane_waypoint_marker.scale.x = 0.01; // 線條寬度
+  lane_waypoint_marker.scale.y = 0.01;
+  lane_waypoint_marker.frame_locked = false; // frame 鎖定與否
+
+   for (int i = 0; i < twist_pairs.size(); i++) // 對每一組速度取樣進行模擬
+  {
+    lane_waypoint_marker.points.clear(); // 清空點集合
+    lane_waypoint_marker.id = i;         // 每一條軌跡需要唯一 ID
+
+    // 計算每一小段距離與旋轉角度
+    double step_dis = (twist_pairs  * dt) / trajectory_point_num_;
+    double step_theta = (twist_pairs  * dt) / trajectory_point_num_; 
+
+    s_x = s_y = 0;     // 起始位置為 (0, 0)
+    theta = step_theta; // 初始角度
+
+    // 模擬整條軌跡上的每個點（每一小段）
+    for (int j = 0; j < trajectory_point_num_; j++)
+    {
+      geometry_msgs::Point point;
+
+      s_x += step_dis * cos(theta); // 根據角度更新 x
+      s_y += step_dis * sin(theta); // 根據角度更新 y
+
+      point.x = s_x;
+      point.y = s_y;
+
+      lane_waypoint_marker.points.push_back(point); // 加入點到軌跡中
+
+      theta += step_theta; // 持續轉彎
+    }
+
+
+    if (best_trajectory_id == i) // 若是最佳軌跡
+    {
+      lane_waypoint_marker.color.r = 0.0; // 綠色
+      lane_waypoint_marker.color.g = 1.0;
+      lane_waypoint_marker.color.b = 0.0;
+      lane_waypoint_marker.color.a = 1.0; // 不透明
+    }
+    else
+    {
+      lane_waypoint_marker.color.r = 1.0; // 紫色（非最佳）
+      lane_waypoint_marker.color.g = 0.0;
+      lane_waypoint_marker.color.b = 1.0;
+      lane_waypoint_marker.color.a = 0.3; // 半透明
+    }
+
+    all_rollOuts.markers.push_back(lane_waypoint_marker); // 加入到 marker array
+  }
+
+   path_marker_pub_.publish(all_rollOuts); // 發布所有軌跡到 RViz 顯示
+}
+
+//-----------------------------------------------------------------------------------------------
+// 服務回呼函式：處理來自外部的導航參數與啟動命令
+// Request 含啟動指令、導航模式、速度限制、方向參數等，Response 可加上回傳狀態
+bool ServiceCallback(campusrover_msgs::PlannerFunction::Request  &req,
+                     campusrover_msgs::PlannerFunction::Response &res)
+{
+  static int last_mode; // 記錄上一輪的導航模式，用於判斷是否有切換
+
+  // ====== Step 1: 解析來自服務請求的參數 ======
+
+  action_flag_ = req.action.data;                  // 是否啟動 DWA 導航器
+  direction_inverse_ = req.direction_inverse.data; // 是否採用反向行駛
+  enble_costmap_obstacle_ = req.obstacle_avoidance.data; // 是否啟用 costmap 障礙物避障功能
+
+  max_linear_velocity_ = req.speed_parameter.linear.x;   // 設定最大線速度
+  max_angular_velocity_ = req.speed_parameter.angular.z; // 設定最大角速度
+
+  path_sub_mode_ = req.mode; // 設定當前路徑來源模式（例如 elevator、global path、button 停車）
+
+  // ====== Step 2: 印出目前設定參數供 debug 檢查 ======
+
+  cout << "recrvie planner fuction : " << endl;
+  cout << "  action_flag : " << action_flag_ << endl;
+  cout << "  direction_inverse : " << direction_inverse_ << endl;
+  cout << "  enble_costmap_obstacle_ : " << enble_costmap_obstacle_ << endl;
+  cout << "  speed fuction : " << req.speed_parameter << endl;
+
+  // ====== Step 3: 如果導航未啟動，或切換了路徑模式，重置狀態 ======
+
+  if(!action_flag_ || path_sub_mode_ != last_mode)
+  {
+    arriving_end_point_ = false;       // 重設「是否已到達目標點」旗標
+    arriving_end_direction_ = false;   // 重設「是否朝向目標方向」旗標
+    // get_globle_path_ = false;       // 若需重新要求路徑，可解除註解
+    get_costmap_data_ = false;         // 重新要求 costmap（避免沿用舊資料）
+  }
+
+  // 更新記錄的模式
+  last_mode = path_sub_mode_;
+
+  return true; // 代表服務處理成功
+}
+
+// 發送服務請求給電梯狀態檢查器，用來通知電梯系統：導航已完成（到達門口/方向朝向完成）
+void ElevatorStatusCheckCallService(ros::ServiceClient &client,
+                                    campusrover_msgs::ElevatorStatusChecker &srv)
+{
+    // 延遲 1.5 秒，避免導航剛完成後 TF/狀態尚未穩定就發送服務
+    ros::Duration(1.5).sleep();
+
+    // 印出 debug 訊息
+    string str = "===========elevator planner status check============= ";
+    cout << "Request massage: \n" << srv.request; // 顯示即將送出的服務內容
+    // 若呼叫失敗（可能是服務尚未 ready 或電梯模組未啟動），則每秒重試
+    int retry_count = 0;
+    const int max_retries = 5;
+
+  while (!client.call(srv) && retry_count++ < max_retries)
+  {
+    ROS_WARN("Retrying elevator status check...");
+    ros::Duration(1.0).sleep();
+  }
+  if (retry_count >= max_retries)
+  {
+    ROS_ERROR("elevator planner status check failed after max retries.");
+  }
+}
+
+//-----------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------
+int main(int argc, char **argv)
+{
+  // 初始化 ROS 節點
+  ros::init(argc, argv, "dwa_planner");
+  ros::NodeHandle nh;
+  ros::NodeHandle nh_private("~");
+
+  // 從參數伺服器讀取所有控制參數並初始化速度取樣等
+  get_parameters(nh_private);
+  ros::Time::init();
+
+  // 訂閱 elevator 模式下的路徑（電梯使用）
+  elevator_path_sub_ = nh.subscribe("elevator_path", 10, ElevatorPathCallback);
+
+  // 訂閱全域規劃路徑（用於全域導航模式）
+  global_path_sub_ = nh.subscribe("global_path", 10, GlobalPathCallback);
+
+  // 訂閱 local costmap（即障礙物地圖）
+  costmap_sub_ = nh.subscribe("costmap", 10, CostmapCallback);
+
+  // 訂閱 odometry（包含線速度與角速度）
+  odom_sub_ = nh.subscribe("odom", 10, OdomCallback);
+
+  // 訂閱自定義障礙物訊息（例如 perception 模型輸出）
+  custom_obst_sub_ = nh.subscribe("obstacles", 1, CB_customObstacle);
+
+  // 發布機器人移動速度（控制訊號 cmd_vel）
+  twist_pub_ = nh.advertise<geometry_msgs::Twist>("cmd_vel", 50);
+
+  // 發布 DWA 預測的 twist 路徑（可視化用）
+  twist_path_pub_ = nh.advertise<nav_msgs::Path>("twist_path", 20);
+
+  // 發布所有模擬軌跡作為 RViz Marker
+  path_marker_pub_ = nh.advertise<visualization_msgs::MarkerArray>("dwa_trajectories", 10);
+
+  // 發布到達目標點的通知訊息（上層可訂閱該話題）
+  global_status_check_pub_ = nh.advertise<std_msgs::Empty>("reach_goal", 20);
+
+  // 每 0.05 秒執行一次主控制邏輯（DWA 模擬與控制）
+  ros::Timer timer = nh.createTimer(ros::Duration(0.05), TimerCallback);
+
+  // 每 2 秒輸出一次目前導航狀態提示訊息
+  ros::Timer msgs_timer = nh.createTimer(ros::Duration(2), msgs_timerCallback);
+
+  // 提供外部控制的服務介面（啟動/設定導航）
+  ros::ServiceServer service = nh.advertiseService("planner_function_dwa", ServiceCallback);
+
+  // 建立 elevator 狀態通報用的服務客戶端（當導航完成後呼叫）
+  elevator_status_check_client_ =
+      nh.serviceClient<campusrover_msgs::ElevatorStatusChecker>("elevator_status_checker");
+
+
+  ros::spin();
+
+  return 0; // 程式正常結束
+}
+
+

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>campusrover_description</name>
+  <version>0.1.0</version>
+  <description>Campus Rover robot URDF, xacro, and visualization files.</description>
+
+  <maintainer email="jackey@todo.todo">jackey</maintainer>
+  <license>BSD</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>rviz</exec_depend>
+  <exec_depend>urdf</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>campusrover_move</name>
+  <version>0.1.0</version>
+  <description>ROS 2 Foxy version of the campusrover_move package</description>
+
+  <maintainer email="luke@todo.todo">luke</maintainer>
+  <license>BSD</license>
+
+  <!-- build tool -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- build & exec dependencies -->
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>laser_geometry</depend>
+  <depend>control_toolbox</depend>
+  <depend>campusrover_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>Eigen3</depend>
+  <depend>costmap_converter_msgs</depend>
+
+  <!-- for service generation -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
