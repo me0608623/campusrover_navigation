@@ -24,7 +24,10 @@
   <depend>control_toolbox</depend>
   <depend>campusrover_msgs</depend>
   <depend>visualization_msgs</depend>
-  <depend>Eigen3</depend>
+  <depend>eigen3</depend>
+  <depend>eigen3_cmake_module</depend>
+
+
   <depend>costmap_converter_msgs</depend>
 
   <!-- for service generation -->

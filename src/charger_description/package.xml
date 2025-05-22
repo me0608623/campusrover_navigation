@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>charger_description</name>
+  <version>1.0.0</version>
+  <description>
+    URDF Description package for Charger Rover.  
+    Contains 3D models, URDF and launch files for simulation.
+  </description>
+
+  <!-- 一個 maintainer 就好，改成你的 email -->
+  <maintainer email="your.email@example.com">Your Name</maintainer>
+
+  <license>BSD-3-Clause</license>
+
+  <!-- build 工具 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 如果你要用 xacro，取消下面這行的註解 -->
+  <!-- <depend>xacro</depend> -->
+
+  <!-- ros2 用到的執行時依賴 -->
+  <depend>robot_state_publisher</depend>
+  <depend>joint_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>gazebo_ros</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,7 +1,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, EnvironmentVariable
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, EnvironmentVariable
+
 from launch_ros.actions import Node
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from ament_index_python.packages import get_package_share_directory
@@ -10,6 +11,8 @@ import os
 
 def generate_launch_description():
     # === 宣告變數（對應 ROS 1 的 $(arg ...)）===
+    use_sim = LaunchConfiguration('use_sim')
+
     debug = LaunchConfiguration('debug')  
     bag_filename = LaunchConfiguration('bag_filename')  
     elevator_path = LaunchConfiguration('elevator_path')  
@@ -20,11 +23,12 @@ def generate_launch_description():
     enble_pullover_mode = LaunchConfiguration('enble_pullover_mode')
 
     campusrover_move_share = get_package_share_directory('campusrover_move')
-    campusrover_description_share = get_package_share_directory('campusrover_description')
+    campusrover_description_share = get_package_share_directory('charger_description')
 
     # === 開始回傳整體 Launch Description ===
     return LaunchDescription([
         # === 宣告 launch 參數 ===
+        DeclareLaunchArgument('use_sim', default_value='false'),
         DeclareLaunchArgument('debug', default_value='false'),
         
         DeclareLaunchArgument('bag_filename',
@@ -36,40 +40,51 @@ def generate_launch_description():
         DeclareLaunchArgument('elevator_path', default_value='/elevator_path'),
         DeclareLaunchArgument('global_path', default_value='/global_path'),
         DeclareLaunchArgument('local_costmap', default_value='/campusrover_local_costmap'),
-        DeclareLaunchArgument('cmd_vel', default_value='/input/nav_cmd_vel'),
+        DeclareLaunchArgument('cmd_vel', default_value='/cmd_vel'),
         DeclareLaunchArgument('enble_dwa_obstacle_avoidance', default_value='false'),
         DeclareLaunchArgument('enble_pullover_mode', default_value='false'),
-
-        # === Debug 模式 Group：rosbag + robot_state_publisher + rviz2 ===
-        GroupAction([
-            Node(
-                package='rosbag2',
-                executable='play',
-                name='playbag',
-                arguments=['--clock', bag_filename],
-                condition=IfCondition(debug)  
-            ),
-            # 修改 robot_state_publisher 以使用一個簡單的機器人描述而非從外部套件讀取
-            Node(
-                package='robot_state_publisher',
-                executable='robot_state_publisher',
-                name='robot_state_publisher',
-                parameters=[{
-                    'robot_description': open(
-                        os.path.join(campusrover_description_share, 'urdf', 'campusrover.urdf')
-                    ).read(),
-                    'use_sim_time': True
-                }],
-                condition=IfCondition(debug)
-            ),
-            Node(
-                package='rviz2',
-                executable='rviz2',
-                name='rviz',
-                arguments=['-d', os.path.join(campusrover_move_share, 'rviz', 'dp_planner.rviz')],
-                condition=IfCondition(debug)
-            )
-        ]),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            output='screen',
+            arguments=[
+                '-d', os.path.join(campusrover_move_share, 'rviz', 'dp_planner.rviz')
+            ],
+            # 只有在 debug 模式或非 sim 模式下才打开
+            condition=UnlessCondition(use_sim)
+        ),
+        # # === Debug 模式 Group：rosbag + robot_state_publisher + rviz2 ===
+        # GroupAction([
+        #     Node(
+        #         package='rosbag2',
+        #         executable='play',
+        #         name='playbag',
+        #         arguments=['--clock', bag_filename],
+        #         condition=IfCondition(debug)  
+        #     ),
+        #     # 修改 robot_state_publisher 以使用一個簡單的機器人描述而非從外部套件讀取
+        #     Node(
+        #         package='robot_state_publisher',
+        #         executable='robot_state_publisher',
+        #         name='robot_state_publisher',
+        #         parameters=[{
+        #             'robot_description': open(
+        #                 os.path.join(campusrover_description_share, 'urdf', 'campusrover.urdf')
+        #             ).read(),
+        #             'use_sim_time': True
+        #         }],
+        #         condition=IfCondition(debug)
+        #     ),
+        #     Node(
+        #         package='rviz2',
+        #         executable='rviz2',
+        #         name='rviz',
+        #         arguments=['-d', os.path.join(campusrover_move_share, 'rviz', 'dp_planner.rviz')],
+        #         condition=IfCondition(debug)
+        #     )
+        # ]),
+       
 
         # === 主導航節點：path_following ===
         Node(
@@ -123,4 +138,11 @@ def generate_launch_description():
         #     ),
         #     condition=IfCondition(enble_pullover_mode)
         # ),
+         IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(campusrover_move_share,
+                            'launch', 'sim_world.launch.py')   # 你的 Gazebo 啟動檔
+            ),
+            condition=IfCondition(use_sim)      # 建議改用 use_sim 布林 flag
+        ),
     ])
